@@ -1,0 +1,184 @@
+import os
+import sqlite3
+from datetime import datetime
+
+cartella_corrente = os.path.dirname(os.path.abspath(__file__))
+file_sql = os.path.join(cartella_corrente, "..", "sql", "database.sql")
+file_db = os.path.join(cartella_corrente, "spese.db")
+
+def apri_connessione():
+    nuovo_db = not os.path.exists(file_db)
+    c = sqlite3.connect(file_db)
+    c.execute("PRAGMA foreign_keys = ON")
+    if nuovo_db:
+        with open(file_sql, encoding="utf-8") as f:
+            c.executescript(f.read())
+    return c
+
+def chiedi_numero(messaggio):
+    valore = input(messaggio).replace(",", ".")
+    try:
+        return float(valore)
+    except ValueError:
+        return -1.0
+
+def controlla_data(testo_data, tipo):
+    try:
+        if tipo == "g":
+            datetime.strptime(testo_data, "%Y-%m-%d")
+        else:
+            datetime.strptime(testo_data, "%Y-%m")
+        return True
+    except ValueError:
+        return False
+
+def prendi_id_cat(c, nome_cat):
+    cursore = c.execute("SELECT id FROM categorie WHERE nome = ?", (nome_cat,)).fetchone()
+    if cursore:
+        return cursore[0]
+    return None
+
+def aggiungi_categoria(c):
+    nome = input("Inserisci il nome della categoria: ").strip()
+    if nome == "":
+        print("Errore! Campo vuoto.")
+        return
+    if prendi_id_cat(c, nome) is not None:
+        print("Questa categoria esiste già nel sistema.")
+        return
+    c.execute("INSERT INTO categorie (nome) VALUES (?)", (nome,))
+    c.commit()
+    print("Fatto! Categoria salvata.")
+
+def aggiungi_spesa(c):
+    dt = input("Data (AAAA-MM-GG): ").strip()
+    if not controlla_data(dt, "g"):
+        print("Errore: il formato data è sbagliato.")
+        return
+    soldi = chiedi_numero("Importo speso: ")
+    if soldi <= 0:
+        print("Errore: l'importo deve essere positivo.")
+        return
+    cat_scelta = input("Nome Categoria: ").strip()
+    id_cat = prendi_id_cat(c, cat_scelta)
+    if id_cat is None:
+        print("Errore: la categoria inserita non esiste.")
+        return
+    nota = input("Descrizione (puoi lasciare vuoto): ").strip()
+    if nota == "":
+        nota = None
+    c.execute(
+        "INSERT INTO spese (data, importo, id_categoria, descrizione) VALUES (?, ?, ?, ?)",
+        (dt, soldi, id_cat, nota)
+    )
+    c.commit()
+    print("Spesa aggiunta correttamente!")
+
+def imposta_budget(c):
+    periodo = input("Inserisci il mese (AAAA-MM): ").strip()
+    if not controlla_data(periodo, "m"):
+        print("Errore: mese non valido.")
+        return
+    cat_scelta = input("Nome Categoria: ").strip()
+    id_cat = prendi_id_cat(c, cat_scelta)
+    if id_cat is None:
+        print("Errore: categoria inesistente.")
+        return
+    limite = chiedi_numero("Importo massimo budget: ")
+    if limite <= 0:
+        print("Errore: inserisci un budget maggiore di zero.")
+        return
+    esiste = c.execute("SELECT 1 FROM budget WHERE mese = ? AND id_categoria = ?", (periodo, id_cat)).fetchone()
+    if esiste:
+        c.execute("UPDATE budget SET importo = ? WHERE mese = ? AND id_categoria = ?", (limite, periodo, id_cat))
+    else:
+        c.execute("INSERT INTO budget (mese, id_categoria, importo) VALUES (?, ?, ?)", (periodo, id_cat, limite))
+    c.commit()
+    print("Budget registrato.")
+
+def stampa_totali(c):
+    spese = c.execute("SELECT id_categoria, SUM(importo) FROM spese GROUP BY id_categoria").fetchall()
+    mappa_spese = {}
+    for id_cat, tot in spese:
+        mappa_spese[id_cat] = tot
+    tutte_cat = c.execute("SELECT id, nome FROM categorie ORDER BY nome").fetchall()
+    print("\n--- TOTALE SPESE PER CATEGORIA ---")
+    for id_cat, nome in tutte_cat:
+        totale_speso = mappa_spese.get(id_cat, 0.0)
+        print(f"Categoria: {nome} -> Speso: {totale_speso:.2f}€")
+
+def stampa_budget(c):
+    budgets = c.execute("SELECT b.mese, b.importo, c.nome, b.id_categoria FROM budget b JOIN categorie c ON c.id = b.id_categoria ORDER BY b.mese").fetchall()
+    if len(budgets) == 0:
+        print("Non ci sono budget salvati.")
+        return
+    for mese, limite, nome_cat, id_cat in budgets:
+        query_speso = c.execute(
+            "SELECT SUM(importo) FROM spese WHERE id_categoria = ? AND data LIKE ?", 
+            (id_cat, f"{mese}%")
+        ).fetchone()
+        speso = query_speso[0] if query_speso[0] is not None else 0.0
+        print(f"\nMese: {mese} | Categoria: {nome_cat}")
+        print(f"Budget impostato: {limite:.2f}€ | Speso effettivamente: {speso:.2f}€")
+        if speso > limite:
+            print("⚠️ ATTENZIONE: HAI SUPERATO IL BUDGET!")
+        else:
+            print("✔️ Situazione sotto controllo.")
+
+def stampa_lista_spese(c):
+    dati = c.execute(
+        "SELECT s.data, c.nome, s.importo, s.descrizione "
+        "FROM spese s JOIN categorie c ON c.id = s.id_categoria ORDER BY s.data"
+    ).fetchall()
+    print("\n--- ELENCO SPESE ORDINATE ---")
+    for data, cat, cifra, dsc in dati:
+        nota = dsc if dsc else ""
+        print(f"[{data}] {cat}: {cifra:.2f}€ | {nota}")
+
+def sottomenu_report(c):
+    while True:
+        print("\nSotto-menu Report:")
+        print("a) Totale speso per ogni categoria")
+        print("b) Controllo budget mensili")
+        print("c) Elenco cronologico spese")
+        print("d) Torna indietro")
+        opzione = input("Seleziona una lettera: ").strip().lower()
+        if opzione == "a":
+            stampa_totali(c)
+        elif opzione == "b":
+            stampa_budget(c)
+        elif opzione == "c":
+            stampa_lista_spese(c)
+        elif opzione == "d":
+            break
+        else:
+            print("Lettera non valida.")
+
+def avvia():
+    db = apri_connessione()
+    print("=== PROGRAMMA GESTIONE SPESE PERSONALI ===")
+    while True:
+        print("\nMENU PRINCIPALE")
+        print("1. Aggiungi Categoria")
+        print("2. Registra Spesa")
+        print("3. Imposta Budget per il Mese")
+        print("4. Apri Sezione Report")
+        print("5. Chiudi applicazione")
+        scelta = input("Cosa vuoi fare? (1-5): ").strip()
+        if scelta == "1":
+            aggiungi_categoria(db)
+        elif scelta == "2":
+            aggiungi_spesa(db)
+        elif scelta == "3":
+            imposta_budget(db)
+        elif scelta == "4":
+            sottomenu_report(db)
+        elif scelta == "5":
+            print("Uscita in corso... Arrivederci!")
+            break
+        else:
+            print("Scelta errata. Inserisci un numero da 1 a 5.")
+    db.close()
+
+if __name__ == "__main__":
+    avvia()
